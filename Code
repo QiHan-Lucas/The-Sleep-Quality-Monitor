@@ -1,0 +1,157 @@
+#include <SPI.h>
+#include <Wire.h>
+#include "MAX30105.h"        // Library for MAX30105 heart-rate/IR sensor
+#include "heartRate.h"       // Beat detection algorithm
+#include <Adafruit_GFX.h>    // Graphics library for OLED
+#include <Adafruit_SH110X.h> // SH1107 OLED driver
+
+MAX30105 particleSensor;     // MAX30105 sensor object
+
+// Heart-rate averaging variables
+const byte RATE_SIZE = 2;    // Number of BPM samples to average
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;           // Timestamp of last heartbeat
+float beatsPerMinute;        // Instant heart rate (BPM)
+int beatAvg;                 // Averaged BPM
+
+// Sleep analysis counters
+int Count1 = 0;  // Deep sleep duration counter (low BPM < 60)
+int Count2 = 0;  // Light sleep / wake counter (BPM too low or too high)
+int Count3 = 0;  // Normal sleep counter (BPM between 60–150)
+
+// Total sleep time = Count1 + Count2 + Count3
+// Sleep quality = Count1 / (Count1 + Count2 + Count3)
+
+Adafruit_SH1107 display = Adafruit_SH1107(64, 128, &Wire);
+
+// Buttons
+#define BUTTON_A 9
+#define BUTTON_B 6
+#define BUTTON_C 5
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Initializing...");
+
+  // Initialize MAX30105 sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX30105 was not found. Please check wiring/power.");
+    while (1);
+  }
+
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x0A);  // Enable red LED for pulse detection
+  particleSensor.setPulseAmplitudeGreen(0);   // Disable green LED
+
+  // Initialize OLED display
+  display.begin(0x3C, true);
+  display.display();
+  delay(1000);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+
+  // Initialize buttons with pull-up resistors
+  pinMode(BUTTON_A, INPUT_PULLUP);
+  pinMode(BUTTON_B, INPUT_PULLUP);
+  pinMode(BUTTON_C, INPUT_PULLUP);
+}
+
+void loop() {
+  long irValue = particleSensor.getIR(); // IR value used for detecting heartbeat
+
+  // Heartbeat detection
+  if (checkForBeat(irValue) == true) {
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+
+    // Convert beat interval into BPM
+    beatsPerMinute = 60 / (delta / 1000.0);
+
+    // Accept only valid BPM ranges
+    if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+      rates[rateSpot++] = (byte)beatsPerMinute;
+      rateSpot %= RATE_SIZE;
+
+      // Compute average BPM
+      beatAvg = 0;
+      for (byte x = 0; x < RATE_SIZE; x++) {
+        beatAvg += rates[x];
+      }
+      beatAvg /= RATE_SIZE;
+    }
+  }
+
+  // Only process sleep data if BPM is meaningful
+  if (beatsPerMinute > 30) {
+
+    // Classify BPM into sleep stages:
+    // Deep Sleep (slow heart rate)
+    if (beatsPerMinute < 60) {
+      Count1++;  // Deep sleep time
+    }
+    // Normal Sleep
+    else if (beatsPerMinute <= 150) {
+      Count3++;  // Normal sleep time
+    }
+    // Light Sleep / Wakefulness
+    else {
+      Count2++;  // Restless or awake time
+    }
+
+    // Calculate total sleep time only if valid
+    if ((Count2 + Count3) > 0) {
+      float totalSleep = (float)(Count1 + Count2 + Count3);
+      float ratio = (float)Count1 / totalSleep;  // Deep sleep proportion
+
+      Serial.print(", Deep Sleep Ratio = ");
+      Serial.println(ratio);
+
+      // Update OLED display
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.print("BPM: ");
+      display.print(beatsPerMinute);
+      display.print(" Avg: ");
+      display.print(beatAvg);
+      display.print(" Deep %: ");
+      display.print(ratio * 100, 1); // Show as percentage
+
+      // Finger detection
+      if (irValue < 50000) {
+        display.println(" No finger?");
+      } else {
+        display.println();
+      }
+
+      display.display();
+    }
+    else {
+      Serial.println(", Total sleep time = 0, ratio cannot be calculated");
+    }
+  }
+  else {
+    Count2++; 
+  }
+
+  // Serial debug output
+  Serial.print("IR=");
+  Serial.print(irValue);
+  Serial.print(", BPM=");
+  Serial.print(beatsPerMinute);
+  Serial.print(", Avg BPM=");
+  Serial.print(beatAvg);
+  Serial.print(", Deep=");
+  Serial.print(Count1);
+  Serial.print(", Light=");
+  Serial.print(Count2);
+  Serial.print(", Normal=");
+  Serial.print(Count3);
+
+  if (irValue < 50000) {
+    Serial.println(" No finger?");
+  }
+
+  Serial.println();
+}
